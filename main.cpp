@@ -111,6 +111,26 @@ std::vector<VisualOdometryData> loadVoData(const std::string &filename) {
   return vo_measurements;
 }
 
+bool saveToFile(const std::string &filename, std::vector<VisualOdometryData> &optimized_data) {
+  // Save VO and IMU data separately
+  std::ofstream est_file(filename);
+
+  if (!est_file.is_open()) {
+    return false;
+  }
+
+  // Write VO data
+  for (const auto &pose_data : optimized_data) {
+    const auto &quat = pose_data.pose.rotation().toQuaternion();
+    const auto &trans = pose_data.pose.translation();
+    est_file << std::fixed << std::setprecision(9) << pose_data.timestamp << " " << trans.x() << " " << trans.y() << " "
+             << trans.z() << " " << quat.x() << " " << quat.y() << " " << quat.z() << " " << quat.w() << std::endl;
+  }
+
+  est_file.close();
+  return true;
+}
+
 int main(int argc, char const *argv[]) {
   if (argc != 4) {
     std::cerr << "Usage: " << argv[0] << " OPTIMIZATION_TYPE=(lm|isam) <imu_file.txt> <vo_file.txt> " << std::endl;
@@ -128,22 +148,12 @@ int main(int argc, char const *argv[]) {
   std::vector<ImuData> imu_data = loadImuData(argv[2]);
   std::vector<VisualOdometryData> vo_data = loadVoData(argv[3]);
 
-  std::cout << "IMU data size: " << imu_data.size() << std::endl;
-  std::cout << "VO data size: " << vo_data.size() << std::endl;
-
-  std::cout << "First VO data:" << std::endl;
-  vo_data.front().print();
-  std::cout << "Last VO data:" << std::endl;
-  vo_data.back().print();
-
-  std::cout << "First IMU data:" << std::endl;
-  imu_data.front().print();
-  std::cout << "Last IMU data:" << std::endl;
-  imu_data.back().print();
-
   if (imu_data.empty() || vo_data.empty()) {
     std::cerr << "Failed to load data files" << std::endl;
     return 1;
+  } else {
+    std::cout << imu_data.size() << " IMU data loaded." << std::endl;
+    std::cout << vo_data.size() << "VO data loaded." << std::endl;
   }
 
   ISAM2Params parameters;
@@ -184,19 +194,12 @@ int main(int argc, char const *argv[]) {
   Matrix33 measured_omega_cov = Matrix33::Identity(3, 3) * pow(gyro_noise_sigma, 2);
   Matrix33 integration_error_cov =
       Matrix33::Identity(3, 3) * 1e-8;  // error committed in integrating position from velocities
-  // Matrix33 bias_acc_cov = Matrix33::Identity(3,3) * pow(accel_bias_rw_sigma,2);
-  // Matrix33 bias_omega_cov = Matrix33::Identity(3,3) * pow(gyro_bias_rw_sigma,2);
-  // Matrix66 bias_acc_omega_int = Matrix::Identity(6,6)*1e-5; // error in the bias used for preintegration
 
   std::shared_ptr<PreintegratedImuMeasurements::Params> p = PreintegratedImuMeasurements::Params::MakeSharedU();
   // PreintegrationBase params:
   p->accelerometerCovariance = measured_acc_cov;     // acc white noise in continuous
   p->integrationCovariance = integration_error_cov;  // integration uncertainty continuoustgf
   p->gyroscopeCovariance = measured_omega_cov;       // gyro white noise in continuous
-  // // PreintegrationCombinedMeasurements params:
-  // p->biasAccCovariance = bias_acc_cov; // acc bias in continuous
-  // p->biasOmegaCovariance = bias_omega_cov; // gyro bias in continuous
-  // p->biasAccOmegaInt = bias_acc_omega_int;
 
   imu_preintegrated_ = new PreintegratedImuMeasurements(p, prior_imu_bias);
   double dt = 0.0;
@@ -283,22 +286,7 @@ int main(int argc, char const *argv[]) {
   }
   std::cout << "size of optimized data: " << optimized_data.size() << std::endl;
 
-  // Save VO and IMU data separately
-  std::ofstream est_file("../estimated.txt");
-
-  if (!est_file.is_open()) {
-    return false;
-  }
-
-  // Write VO data
-  for (const auto &pose_data : optimized_data) {
-    const auto &quat = pose_data.pose.rotation().toQuaternion();
-    const auto &trans = pose_data.pose.translation();
-    est_file << std::fixed << std::setprecision(9) << pose_data.timestamp << " " << trans.x() << " " << trans.y() << " "
-             << trans.z() << " " << quat.x() << " " << quat.y() << " " << quat.z() << " " << quat.w() << std::endl;
-  }
-
-  est_file.close();
-
+  bool res = saveToFile("../estimated.txt", optimized_data);
+  if (res) std::cout << "The optimized data has been saved to estimated.txt" << std::endl;
   return 0;
 }
