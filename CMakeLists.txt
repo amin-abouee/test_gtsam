@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(GTSAMExample)
+project(gtsam_vio)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -14,7 +14,7 @@ find_package(Eigen3 REQUIRED)
 include_directories(${GTSAM_INCLUDE_DIR})
 
 # Add executable
-add_executable(GTSAMExample main.cpp)
+add_executable(gtsam_vio main.cpp)
 
 # Link GTSAM
-target_link_libraries(GTSAMExample Eigen3::Eigen gtsam)
+target_link_libraries(gtsam_vio Eigen3::Eigen gtsam)

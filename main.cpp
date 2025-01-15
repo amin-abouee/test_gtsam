@@ -328,7 +328,7 @@ int main(int argc, char const *argv[]) {
     gtsam::Pose3 relative_pose = last_vo_in_imu.between(current_vo_in_imu);
 
     // Noise model for the VO factor (tune sigma based on VO accuracy).
-    auto vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-5);
+    auto vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-4);
 
     // Add a between factor for the relative pose from VO.
     graph.add(gtsam::BetweenFactor<gtsam::Pose3>(X(correction_count - 1), X(correction_count), relative_pose,
