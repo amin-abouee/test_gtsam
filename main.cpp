@@ -133,7 +133,8 @@ std::vector<VisualOdometryData> loadVoData(const std::string &filename) {
     VisualOdometryData data;
     double timestamp_sec;
     gtsam::Vector3 translation;
-    gtsam::Vector4 rotation_quat;  // w, x, y, z
+    gtsam::Vector4 rotation_quat;            // w, x, y, z
+    Eigen::Matrix<double, 6, 6> covariance;  // 6x6 covariance matrix
 
     // Read timestamp
     if (!(iss >> timestamp_sec)) continue;
@@ -145,9 +146,19 @@ std::vector<VisualOdometryData> loadVoData(const std::string &filename) {
     // Read rotation quaternion
     for (int i = 0; i < 4; i++) iss >> rotation_quat[i];
 
+    // Read covariance matrix (36 elements)
+    for (int i = 0; i < 6; i++) {
+      for (int j = 0; j < 6; j++) {
+        iss >> covariance(i, j);
+      }
+    }
+
     // Create Pose3 from translation and rotation
     data.pose = gtsam::Pose3(
         gtsam::Rot3::Quaternion(rotation_quat[3], rotation_quat[0], rotation_quat[1], rotation_quat[2]), translation);
+
+    // Store covariance matrix
+    data.covariance = covariance;
 
     vo_measurements.push_back(data);
   }
@@ -182,6 +193,30 @@ bool saveToFile(const std::string &filename, std::vector<VisualOdometryData> &op
   }
 
   est_file.close();
+  return true;
+}
+
+bool savePreintegrationToFile(const std::string &filename,
+                              const std::vector<std::pair<double, gtsam::NavState>> &preintegration_data) {
+  std::ofstream file(filename);
+
+  if (!file.is_open()) {
+    return false;
+  }
+
+  for (const auto &data : preintegration_data) {
+    const auto &timestamp = data.first;
+    const auto &nav_state = data.second;
+    const auto &position = nav_state.position();
+    const auto &rotation = nav_state.attitude().rpy();
+    const auto &velocity = nav_state.velocity();
+
+    file << std::fixed << std::setprecision(20) << timestamp << " " << position.x() << " " << position.y() << " "
+         << position.z() << " " << rotation.x() << " " << rotation.y() << " " << rotation.z() << " " << velocity.x()
+         << " " << velocity.y() << " " << velocity.z() << std::endl;
+  }
+
+  file.close();
   return true;
 }
 
@@ -226,6 +261,7 @@ int main(int argc, char const *argv[]) {
   }
 
   int correction_count = 0;
+  double scale = 1.0;
 
   // iSAM2 optimization parameters.
   gtsam::ISAM2Params parameters;
@@ -254,7 +290,7 @@ int main(int argc, char const *argv[]) {
 
   // Noise models for prior factors.
   auto pose_noise_model = gtsam::noiseModel::Diagonal::Sigmas(
-      (gtsam::Vector(6) << 0.01, 0.01, 0.01, 0.1, 0.1, 0.).finished());     // rad,rad,rad,m, m, m
+      (gtsam::Vector(6) << 0.01, 0.01, 0.01, 0.1, 0.1, 0.1).finished());    // rad,rad,rad,m, m, m
   auto velocity_noise_model = gtsam::noiseModel::Isotropic::Sigma(3, 0.1);  // m/s
   auto bias_noise_model = gtsam::noiseModel::Diagonal::Sigmas(
       (gtsam::Vector6() << gtsam::Vector3::Constant(3.0000e-3), gtsam::Vector3::Constant(0.5e-05)).finished());
@@ -273,7 +309,9 @@ int main(int argc, char const *argv[]) {
   auto imu_gyro_noise_model = gtsam::noiseModel::Diagonal::Sigmas(gtsam::Vector3(1.6968e-04, 1.6968e-04, 1.6968e-04));
   auto imu_integration_noise_model = gtsam::noiseModel::Diagonal::Sigmas(gtsam::Vector3(1e-8, 1e-8, 1e-8));
 
-  const auto preint_params = gtsam::PreintegratedCombinedMeasurements::Params::MakeSharedU(9.81);
+  // Create and initialize PreintegrationCombinedParams
+  auto preint_params = std::make_shared<gtsam::PreintegrationCombinedParams>(gtsam::Vector3(-9.81, 0, 0));
+  // Set the parameters
   preint_params->accelerometerCovariance = imu_accel_noise_model->covariance();
   preint_params->gyroscopeCovariance = imu_gyro_noise_model->covariance();
   preint_params->integrationCovariance = imu_integration_noise_model->covariance();
@@ -292,6 +330,7 @@ int main(int argc, char const *argv[]) {
 
   // Vector to store optimized trajectory data.
   std::vector<VisualOdometryData> optimized_data;
+  std::vector<std::pair<double, gtsam::NavState>> preintegeration_states;
 
   // Main loop: Iterate through the VO data and integrate IMU measurements.
   for (auto iter_odom = vo_data.begin() + 1; iter_odom != vo_data.end(); ++iter_odom) {
@@ -304,13 +343,17 @@ int main(int argc, char const *argv[]) {
         dt = 1e-9;
       } else {
         dt = iter_imu->timestamp - std::prev(iter_imu)->timestamp;
-        std::cout << "dt: " << dt << ", current tms: " << iter_imu->timestamp
-                  << ", pre tms: " << std::prev(iter_imu)->timestamp << std::endl;
+        // std::cout << "dt: " << dt << ", current tms: " << iter_imu->timestamp
+        //           << ", pre tms: " << std::prev(iter_imu)->timestamp << std::endl;
       }
       // Integrate the IMU measurement.
       preint_imu_combined->integrateMeasurement(iter_imu->linear_acceleration, iter_imu->angular_velocity, dt);
       del_point = iter_imu;
     }
+
+    auto deltaT = preint_imu_combined->deltaTij();
+    auto deltaX = preint_imu_combined->deltaXij();
+    preintegeration_states.emplace_back(std::make_pair(deltaT, deltaX));
 
     // Increment the correction count.
     correction_count++;
@@ -327,11 +370,29 @@ int main(int argc, char const *argv[]) {
     // Calculate the relative pose between consecutive VO measurements.
     gtsam::Pose3 relative_pose = last_vo_in_imu.between(current_vo_in_imu);
 
+    gtsam::Pose3 scaled_relative_pose(relative_pose.rotation(), relative_pose.translation() * scale);
+
     // Noise model for the VO factor (tune sigma based on VO accuracy).
-    auto vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-4);
+    auto vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-6);
+    // auto vo_noise_model = gtsam::noiseModel::Gaussian::Covariance(iter_odom->covariance);
+    // gtsam::noiseModel::Diagonal::shared_ptr vo_noise_model = gtsam::noiseModel::Diagonal::Sigmas(
+    //     (gtsam::Vector(6) << iter_odom->covariance(0, 0), iter_odom->covariance(1, 1), iter_odom->covariance(2, 2),
+    //      iter_odom->covariance(3, 3), iter_odom->covariance(4, 4), iter_odom->covariance(5, 5))
+    //         .finished());
+
+    // Check if the covariance matrix is -I * identity and use a large sigma if it is.
+    // bool invalid_covariance = (iter_odom->covariance.determinant() == 1.0);
+    // std::cout << "det: " << iter_odom->covariance.determinant() << std::endl;
+    // gtsam::noiseModel::Gaussian::shared_ptr vo_noise_model;
+    // if (invalid_covariance) {
+    //   vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-3);
+    //   std::cout << "I am here: " << std::endl;
+    // } else {
+    //   vo_noise_model = gtsam::noiseModel::Gaussian::Covariance(iter_odom->covariance);
+    // }
 
     // Add a between factor for the relative pose from VO.
-    graph.add(gtsam::BetweenFactor<gtsam::Pose3>(X(correction_count - 1), X(correction_count), relative_pose,
+    graph.add(gtsam::BetweenFactor<gtsam::Pose3>(X(correction_count - 1), X(correction_count), scaled_relative_pose,
                                                  vo_noise_model));
 
     // Predict the current state using IMU preintegration.
@@ -384,17 +445,27 @@ int main(int argc, char const *argv[]) {
     // Print and store the optimized pose.
     gtsam::Vector3 gtsam_position = prev_state.pose().translation();
     gtsam::Quaternion gtsam_quat = prev_state.pose().rotation().toQuaternion();
+
+    if (!optimized_data.empty()) {
+      auto optimized_relative_pose = optimized_data.back().pose.between(prev_state.pose());
+      std::cout << "Norm relative pose: " << scaled_relative_pose.translation().norm() << std::endl;
+      std::cout << "Norm optimized relative pose: " << optimized_relative_pose.translation().norm() << std::endl;
+      scale = optimized_relative_pose.translation().norm() / scaled_relative_pose.translation().norm();
+    }
+
     optimized_data.push_back({iter_odom->timestamp, prev_state.pose()});
-    std::cout << iter_odom->timestamp << " " << gtsam_position(0) << " " << gtsam_position(1) << " "
-              << gtsam_position(2) << " " << gtsam_quat.x() << " " << gtsam_quat.y() << " " << gtsam_quat.z() << " "
-              << gtsam_quat.w() << std::endl;
+    std::cout << "Pose " << correction_count << ": " << iter_odom->timestamp << " " << gtsam_position(0) << " "
+              << gtsam_position(1) << " " << gtsam_position(2) << " " << gtsam_quat.x() << " " << gtsam_quat.y() << " "
+              << gtsam_quat.z() << " " << gtsam_quat.w() << std::endl;
 
     // Remove processed IMU data points to avoid redundant integration in the next iteration.
     imu_data.erase(imu_data.begin(), del_point);
   }
-  std::cout << "size of optimized data: " << optimized_data.size() << std::endl;
+  std::cout << "Size of optimized data: " << optimized_data.size() << std::endl;
 
   bool res = saveToFile("../estimated.txt", optimized_data);
   if (res) std::cout << "The optimized data has been saved to estimated.txt" << std::endl;
+  res = savePreintegrationToFile("../states.txt", preintegeration_states);
+  if (res) std::cout << "The preintegration states have been saved to states.txt" << std::endl;
   return 0;
 }
