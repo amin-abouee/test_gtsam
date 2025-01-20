@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <queue>
 #include <sstream>
 
 // Define symbolic variables for brevity
@@ -220,6 +221,98 @@ bool savePreintegrationToFile(const std::string &filename,
   return true;
 }
 
+bool saveLambdaToFile(const std::string &filename, const std::vector<std::vector<double>> &data) {
+  std::ofstream file(filename);
+
+  if (!file.is_open()) {
+    return false;
+  }
+
+  for (const auto &inner_vec : data) {
+    if (inner_vec.size() != 4) {
+      std::cerr << "Error: Inner vector size is not 4." << std::endl;
+      return false;
+    }
+
+    file << std::fixed << std::setprecision(15) << inner_vec[0] << " " << inner_vec[1] << " " << inner_vec[2] << " "
+         << inner_vec[3] << std::endl;
+  }
+
+  file.close();
+  return true;
+}
+
+std::tuple<double, double, double, double> calculate_lambda(std::vector<gtsam::Pose3> &vo_data,
+                                                            std::vector<gtsam::Pose3> &preintegration_data,
+                                                            int window_size = 20) {
+  // std::vector<double> lambda1_values;
+  // std::vector<double> lambda2_values;
+  std::queue<double> window1;
+  std::queue<double> window2;
+  double vo_translation_magnitude;
+  double imu_translation_magnitude;
+
+  for (size_t i = 1; i < vo_data.size(); ++i) {
+    // Ensure there are corresponding IMU data
+    if (i >= preintegration_data.size()) break;
+
+    // Calculate relative translation from VO
+    gtsam::Pose3 vo_relative_pose = vo_data[i - 1].between(vo_data[i]);
+    vo_translation_magnitude = vo_relative_pose.translation().norm();
+
+    // Calculate relative translation from IMU
+    gtsam::Pose3 imu_relative_pose = preintegration_data[i - 1].between(preintegration_data[i]);
+    imu_translation_magnitude = imu_relative_pose.translation().norm();
+
+    // Avoid division by zero
+    if (vo_translation_magnitude == 0) continue;
+
+    // Calculate scale for this segment
+    double scale = imu_translation_magnitude / vo_translation_magnitude;
+    // std::cout << "index: " << i << " scale: " << scale << std::endl;
+
+    // lambda1_values.push_back(scale);
+    // lambda2_values.push_back(std::log(scale));
+
+    // Maintain window for lambda1
+    if (window1.size() == window_size) {
+      window1.pop();
+    }
+    window1.push(scale);
+
+    // Maintain window for lambda2
+    if (window2.size() == window_size) {
+      window2.pop();
+    }
+    window2.push(std::log(scale));
+  }
+
+  // Calculate lambda1 and lambda2 using moving average
+  double lambda1 = 0;
+  if (!window1.empty()) {
+    double sum1 = 0;
+    std::queue<double> temp_window1 = window1;
+    while (!temp_window1.empty()) {
+      sum1 += temp_window1.front();
+      temp_window1.pop();
+    }
+    lambda1 = sum1 / window1.size();
+  }
+
+  double lambda2 = 0;
+  if (!window2.empty()) {
+    double sum2 = 0;
+    std::queue<double> temp_window2 = window2;
+    while (!temp_window2.empty()) {
+      sum2 += temp_window2.front();
+      temp_window2.pop();
+    }
+    lambda2 = std::exp(sum2 / window2.size());
+  }
+
+  return {vo_translation_magnitude, imu_translation_magnitude, lambda1, lambda2};
+}
+
 /******************************************************************************
  * Function: main
  * Description: The main function of the program. It loads IMU and VO data,
@@ -332,6 +425,11 @@ int main(int argc, char const *argv[]) {
   std::vector<VisualOdometryData> optimized_data;
   std::vector<std::pair<double, gtsam::NavState>> preintegeration_states;
 
+  std::vector<gtsam::Pose3> vo_poses;
+  std::vector<gtsam::Pose3> imu_poses;
+  std::vector<VisualOdometryData> scaled_poses;
+  std::vector<std::vector<double>> norms_and_lambdas;
+
   // Main loop: Iterate through the VO data and integrate IMU measurements.
   for (auto iter_odom = vo_data.begin() + 1; iter_odom != vo_data.end(); ++iter_odom) {
     // Find IMU measurements between the current and previous VO timestamps.
@@ -343,8 +441,6 @@ int main(int argc, char const *argv[]) {
         dt = 1e-9;
       } else {
         dt = iter_imu->timestamp - std::prev(iter_imu)->timestamp;
-        // std::cout << "dt: " << dt << ", current tms: " << iter_imu->timestamp
-        //           << ", pre tms: " << std::prev(iter_imu)->timestamp << std::endl;
       }
       // Integrate the IMU measurement.
       preint_imu_combined->integrateMeasurement(iter_imu->linear_acceleration, iter_imu->angular_velocity, dt);
@@ -370,17 +466,17 @@ int main(int argc, char const *argv[]) {
     // Calculate the relative pose between consecutive VO measurements.
     gtsam::Pose3 relative_pose = last_vo_in_imu.between(current_vo_in_imu);
 
-    gtsam::Pose3 scaled_relative_pose(relative_pose.rotation(), relative_pose.translation() * scale);
+    // gtsam::Pose3 scaled_relative_pose(relative_pose.rotation(), relative_pose.translation() * scale);
 
     // Noise model for the VO factor (tune sigma based on VO accuracy).
-    auto vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-6);
+    auto vo_noise_model = gtsam::noiseModel::Isotropic::Sigma(6, 1e-5);
     // auto vo_noise_model = gtsam::noiseModel::Gaussian::Covariance(iter_odom->covariance);
     // gtsam::noiseModel::Diagonal::shared_ptr vo_noise_model = gtsam::noiseModel::Diagonal::Sigmas(
     //     (gtsam::Vector(6) << iter_odom->covariance(0, 0), iter_odom->covariance(1, 1), iter_odom->covariance(2, 2),
     //      iter_odom->covariance(3, 3), iter_odom->covariance(4, 4), iter_odom->covariance(5, 5))
     //         .finished());
 
-    // Check if the covariance matrix is -I * identity and use a large sigma if it is.
+    // Check if the covariance matrix is - I *identity and use a large sigma if it is.
     // bool invalid_covariance = (iter_odom->covariance.determinant() == 1.0);
     // std::cout << "det: " << iter_odom->covariance.determinant() << std::endl;
     // gtsam::noiseModel::Gaussian::shared_ptr vo_noise_model;
@@ -392,7 +488,7 @@ int main(int argc, char const *argv[]) {
     // }
 
     // Add a between factor for the relative pose from VO.
-    graph.add(gtsam::BetweenFactor<gtsam::Pose3>(X(correction_count - 1), X(correction_count), scaled_relative_pose,
+    graph.add(gtsam::BetweenFactor<gtsam::Pose3>(X(correction_count - 1), X(correction_count), relative_pose,
                                                  vo_noise_model));
 
     // Predict the current state using IMU preintegration.
@@ -401,6 +497,19 @@ int main(int argc, char const *argv[]) {
     initial_values.insert(X(correction_count), last_state.pose());
     initial_values.insert(V(correction_count), last_state.v());
     initial_values.insert(B(correction_count), prev_bias);
+
+    vo_poses.push_back(current_vo_in_imu);
+    imu_poses.push_back(last_state.pose());
+    auto [vo_norm, imu_norm, lambda1, lambda2] = calculate_lambda(vo_poses, imu_poses, 20);
+    std::cout << "vo_norm: " << vo_norm << ", imu norm: " << imu_norm << ", Lambda1: " << lambda1
+              << ", Lambda2: " << lambda1 << std::endl;
+    norms_and_lambdas.emplace_back(std::vector<double>{vo_norm, imu_norm, lambda1, lambda2});
+
+    // Scale VO measurements with lambda1
+    if (correction_count > 40) {
+      gtsam::Pose3 scaled_vo_pose(current_vo_in_imu.rotation(), current_vo_in_imu.translation() * lambda1);
+      scaled_poses.push_back({iter_odom->timestamp, scaled_vo_pose});
+    }
 
     // Optimize the factor graph.
     gtsam::Values result;
@@ -446,12 +555,12 @@ int main(int argc, char const *argv[]) {
     gtsam::Vector3 gtsam_position = prev_state.pose().translation();
     gtsam::Quaternion gtsam_quat = prev_state.pose().rotation().toQuaternion();
 
-    if (!optimized_data.empty()) {
-      auto optimized_relative_pose = optimized_data.back().pose.between(prev_state.pose());
-      std::cout << "Norm relative pose: " << scaled_relative_pose.translation().norm() << std::endl;
-      std::cout << "Norm optimized relative pose: " << optimized_relative_pose.translation().norm() << std::endl;
-      scale = optimized_relative_pose.translation().norm() / scaled_relative_pose.translation().norm();
-    }
+    // if (!optimized_data.empty()) {
+    //   auto optimized_relative_pose = optimized_data.back().pose.between(prev_state.pose());
+    //   std::cout << "Norm relative pose: " << scaled_relative_pose.translation().norm() << std::endl;
+    //   std::cout << "Norm optimized relative pose: " << optimized_relative_pose.translation().norm() << std::endl;
+    //   scale = optimized_relative_pose.translation().norm() / scaled_relative_pose.translation().norm();
+    // }
 
     optimized_data.push_back({iter_odom->timestamp, prev_state.pose()});
     std::cout << "Pose " << correction_count << ": " << iter_odom->timestamp << " " << gtsam_position(0) << " "
@@ -467,5 +576,9 @@ int main(int argc, char const *argv[]) {
   if (res) std::cout << "The optimized data has been saved to estimated.txt" << std::endl;
   res = savePreintegrationToFile("../states.txt", preintegeration_states);
   if (res) std::cout << "The preintegration states have been saved to states.txt" << std::endl;
+  res = saveToFile("../scaled.txt", scaled_poses);
+  if (res) std::cout << "The scaled pose have been saved to scaled.txt" << std::endl;
+  res = saveLambdaToFile("../lambda.txt", norms_and_lambdas);
+  if (res) std::cout << "The lambda and norm data have been saved to lambda.txt" << std::endl;
   return 0;
 }

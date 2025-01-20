@@ -45,7 +45,7 @@ fig.add_trace(
     go.Scatter(
         x=x_range,
         y=data.dx,
-        name="X",
+        name="Pos X",
         line=dict(color="red"),
         mode="lines+markers",
         marker=dict(size=3),
@@ -58,7 +58,7 @@ fig.add_trace(
     go.Scatter(
         x=x_range,
         y=data.dy,
-        name="Y",
+        name="Pos Y",
         line=dict(color="green"),
         mode="lines+markers",
         marker=dict(size=3),
@@ -71,7 +71,7 @@ fig.add_trace(
     go.Scatter(
         x=x_range,
         y=data.dz,
-        name="Z",
+        name="Pos Z",
         line=dict(color="blue"),
         mode="lines+markers",
         marker=dict(size=3),
@@ -86,7 +86,7 @@ fig.add_trace(
     go.Scatter(
         x=x_range,
         y=data.roll,
-        name="Roll",
+        name="Rot Roll",
         line=dict(color="red"),
         mode="lines+markers",
         marker=dict(size=3),
@@ -99,7 +99,7 @@ fig.add_trace(
     go.Scatter(
         x=x_range,
         y=data.pitch,
-        name="Pitch",
+        name="Rot Pitch",
         line=dict(color="green"),
         mode="lines+markers",
         marker=dict(size=3),
@@ -112,7 +112,7 @@ fig.add_trace(
     go.Scatter(
         x=x_range,
         y=data.yaw,
-        name="Yaw",
+        name="Rot Yaw",
         line=dict(color="blue"),
         mode="lines+markers",
         marker=dict(size=3),
